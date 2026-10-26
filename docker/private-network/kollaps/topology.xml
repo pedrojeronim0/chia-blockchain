@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<experiment boot="kollaps:2.0">
+  <services>
+    <service name="dashboard" image="kollaps/dashboard:1.0" supervisor="true" port="8088"/>
+    <service name="timelord" image="chia-private-kollaps:local" command="['timelord', 'timelord']"/>
+    <service name="farmer-1" image="chia-private-kollaps:local" command="['farmer', 'farmer-1']"/>
+    <service name="farmer-2" image="chia-private-kollaps:local" command="['farmer', 'farmer-2']"/>
+    <service name="farmer-3" image="chia-private-kollaps:local" command="['farmer', 'farmer-3']"/>
+  </services>
+  <bridges>
+    <bridge name="switch"/>
+  </bridges>
+  <links>
+    <!-- Each node-to-node path traverses two 5 ms links: 10 ms one-way. -->
+    <link origin="timelord" dest="switch" latency="5" upload="100Mbps" download="100Mbps" network="kollaps_network"/>
+    <link origin="farmer-1" dest="switch" latency="5" upload="100Mbps" download="100Mbps" network="kollaps_network"/>
+    <link origin="farmer-2" dest="switch" latency="5" upload="100Mbps" download="100Mbps" network="kollaps_network"/>
+    <link origin="farmer-3" dest="switch" latency="5" upload="100Mbps" download="100Mbps" network="kollaps_network"/>
+  </links>
+</experiment>

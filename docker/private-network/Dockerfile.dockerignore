@@ -1,0 +1,11 @@
+**
+!chia/
+!chia/**
+!pyproject.toml
+!README.md
+!LICENSE
+!docker/
+!docker/private-network/
+!docker/private-network/**
+**/__pycache__
+**/*.pyc

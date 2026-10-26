@@ -1,0 +1,76 @@
+name: chia-private
+
+x-common: &common
+  image: chia-private:local
+  build:
+    context: ../..
+    dockerfile: docker/private-network/Dockerfile
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 60s
+  networks: [private]
+
+services:
+  timelord:
+    <<: *common
+    environment:
+      ROLE: timelord
+    volumes:
+      - timelord-data:/data
+      - network-ca:/network-ca
+    healthcheck:
+      test: [CMD, chia, rpc, full_node, get_blockchain_state]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  farmer-1:
+    <<: *common
+    environment:
+      ROLE: farmer
+      NODE_NAME: farmer-1
+      PLOT_COUNT: ${PLOT_COUNT:-32}
+    depends_on:
+      timelord:
+        condition: service_healthy
+    volumes:
+      - farmer-1-data:/data
+      - network-ca:/network-ca:ro
+
+  farmer-2:
+    <<: *common
+    environment:
+      ROLE: farmer
+      NODE_NAME: farmer-2
+      PLOT_COUNT: ${PLOT_COUNT:-32}
+    depends_on:
+      timelord:
+        condition: service_healthy
+    volumes:
+      - farmer-2-data:/data
+      - network-ca:/network-ca:ro
+
+  farmer-3:
+    <<: *common
+    environment:
+      ROLE: farmer
+      NODE_NAME: farmer-3
+      PLOT_COUNT: ${PLOT_COUNT:-32}
+    depends_on:
+      timelord:
+        condition: service_healthy
+    volumes:
+      - farmer-3-data:/data
+      - network-ca:/network-ca:ro
+
+networks:
+  private:
+    internal: true
+
+volumes:
+  timelord-data:
+  farmer-1-data:
+  farmer-2-data:
+  farmer-3-data:
+  network-ca:
