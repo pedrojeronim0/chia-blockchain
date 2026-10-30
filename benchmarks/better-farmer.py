@@ -35,6 +35,7 @@ async def main(root_path: pathlib.Path) -> int:
         farmer_pk = farmer_sk.get_g1()
         bt.farmer_sk = farmer_sk
         bt.farmer_pk = farmer_pk
+        service._api.farmer.plot_manager.set_public_keys([farmer_pk], [])
         bt.plot_manager.set_public_keys([farmer_pk], [])
     print("something")
 
@@ -49,4 +50,4 @@ async def main(root_path: pathlib.Path) -> int:
     await service._api.new_signage_point(sp)
     
     return 0
-async_run(main(pathlib.Path("/home/franciscomartins/.chia/mainnet")))
+async_run(main(pathlib.Path("/home/franciscomartins/.chia/testing")))
