@@ -1,6 +1,9 @@
 from chia.farmer.start_farmer import SERVICE_NAME, Service, create_farmer_service
 from chia_rs.sized_bytes import bytes32
-from chia_rs.sized_ints import uint32, uint8
+from chia_rs.sized_ints import uint64,uint32, uint8
+from chia.protocols import farmer_protocol
+from chia.util.hash import std_hash
+from chia.wallet.derive_keys import master_sk_to_farmer_sk, master_sk_to_pool_sk
 from chia.util.config import load_config, load_config_cli
 from chia.util.chia_logging import initialize_service_logging
 from chia.consensus.default_constants import DEFAULT_CONSTANTS, update_testnet_overrides
@@ -17,37 +20,56 @@ async def main(root_path: pathlib.Path) -> int:
     config = load_config(root_path, "config.yaml", fill_missing_services=True)
     service_config = load_config_cli(root_path, "config.yaml", SERVICE_NAME)
     config[SERVICE_NAME] = service_config
+    service_config["logging"]["log_stdout"] = True
+    service_config["logging"]["log_level"] = "INFO"
     config_pool = load_config_cli(root_path, "config.yaml", "pool")
     config["pool"] = config_pool
     initialize_service_logging(service_name=SERVICE_NAME, config=config, root_path=root_path)
     keychain = Keychain()
     all_keys = keychain.get_all_private_keys()
 
-    service = create_farmer_service(root_path, config, config_pool, DEFAULT_CONSTANTS)
+    service = create_farmer_service(root_path, config, config_pool, DEFAULT_CONSTANTS,keychain=Keychain())
     bt = BlockTools(
-        DEFAULT_CONSTANTS,
+        DEFAULT_CONSTANTS, 
         root_path,
         config_overrides={"simulator": {"use_current_time": True}},
-        plot_dir="/home/franciscomartins/.chia/testing/plots",
+        plot_dir="/home/franciscomartins/.chia/my_testnet/plots/final",keychain=Keychain()
     )
-    if all_keys:
-        farmer_sk = all_keys[0][0]  # Use the key that matches your plots
-        farmer_pk = farmer_sk.get_g1()
-        bt.farmer_sk = farmer_sk
-        bt.farmer_pk = farmer_pk
-        service._api.farmer.plot_manager.set_public_keys([farmer_pk], [])
-        bt.plot_manager.set_public_keys([farmer_pk], [])
+    #if all_keys:
+        #farmer_sk = all_keys[3][0]  # Use the key that matches your plots
+        #farmer_pk = farmer_sk.get_g1()
+        #print(farmer_sk)
+        #print(farmer_pk)
+        #bt.farmer_sk = farmer_sk
+        #bt.farmer_pk = farmer_pk
+        #service._api.farmer.plot_manager.set_public_keys([farmer_pk], [])
+        #bt.plot_manager.set_public_keys([farmer_pk], [])
+        #pass
     print("something")
+    bt.plot_manager.set_public_keys(
+        [master_sk_to_farmer_sk(sk).get_g1() for sk, _ in all_keys],
+        [master_sk_to_pool_sk(sk).get_g1() for sk, _ in all_keys],
+    )
+    bt.plot_manager.set_refresh_callback(lambda event, result: None)
 
-    bt.add_plot_directory(pathlib.Path("/home/franciscomartins/.chia/testing/plots"))
-
+    bt.add_plot_directory(root_path / "plots" / "final")
     # Trigger the PlotManager to scan for plots
     await bt.refresh_plots()
-    print(all_keys)
+    #print(all_keys)
     plot_infos = list(bt.plot_manager.plots.values())
+    print(f"loaded plots: {len(plot_infos)}")
     print(plot_infos)
-    sp = bt.create_signage_point(peak_height=uint32(10), signage_point_index=uint8(0))
+    sp = farmer_protocol.NewSignagePoint(
+        challenge_hash=std_hash(b"benchmark challenge"),
+        challenge_chain_sp=std_hash(b"benchmark cc sp"),
+        reward_chain_sp=std_hash(b"benchmark rc sp"),
+        difficulty=uint64(1),
+        sub_slot_iters=uint64(1_000_000),
+        signage_point_index=uint8(0),
+        peak_height=uint32(10),
+        last_tx_height=uint32(9),
+    )
     await service._api.new_signage_point(sp)
     
     return 0
-async_run(main(pathlib.Path("/home/franciscomartins/.chia/testing")))
+async_run(main(pathlib.Path("/home/franciscomartins/.chia/my_testnet")))
