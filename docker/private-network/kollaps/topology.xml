@@ -2,10 +2,10 @@
 <experiment boot="kollaps:2.0">
   <services>
     <service name="dashboard" image="kollaps/dashboard:1.0" supervisor="true" port="8088"/>
-    <service name="timelord" image="chia-private-kollaps:local" command="['timelord', 'timelord']"/>
-    <service name="farmer-1" image="chia-private-kollaps:local" command="['farmer', 'farmer-1']"/>
-    <service name="farmer-2" image="chia-private-kollaps:local" command="['farmer', 'farmer-2']"/>
-    <service name="farmer-3" image="chia-private-kollaps:local" command="['farmer', 'farmer-3']"/>
+    <service name="timelord" image="chia-private:local" command="['timelord', 'timelord']"/>
+    <service name="farmer-1" image="chia-private:local" command="['farmer', 'farmer-1']"/>
+    <service name="farmer-2" image="chia-private:local" command="['farmer', 'farmer-2']"/>
+    <service name="farmer-3" image="chia-private:local" command="['farmer', 'farmer-3']"/>
   </services>
   <bridges>
     <bridge name="switch"/>

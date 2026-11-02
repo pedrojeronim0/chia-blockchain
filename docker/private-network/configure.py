@@ -38,7 +38,8 @@ def main() -> None:
         if isinstance(section, dict) and "selected_network" in section:
             section["selected_network"] = network
             section["network_overrides"] = config["network_overrides"]
-    config["logging"]["log_stdout"] = True
+    # Kollaps-launched application output may not reach Docker's container logs.
+    config["logging"]["log_stdout"] = False
     config["logging"]["log_level"] = "INFO"
     node = config["full_node"]
     node["enable_upnp"] = False

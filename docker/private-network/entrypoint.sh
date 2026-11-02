@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export ROLE=${1:?Expected role: timelord or farmer}
+export NODE_NAME=${2:?Expected node name}
+: "${KOLLAPS_UUID:?Kollaps must provide an experiment UUID}"
+
 mkdir -p "$CHIA_ROOT" /data/plots/k19 /data/tmp
 if [[ ! -f "$CHIA_ROOT/config/config.yaml" ]]; then
+  # Each node keeps its own private CA and service certificates in /data.
   chia init
-  if [[ "$ROLE" == farmer ]]; then
-    chia init -c /network-ca
-  fi
-fi
-if [[ "$ROLE" == timelord ]]; then
-  cp "$CHIA_ROOT/config/ssl/ca/private_ca.crt" /network-ca/
-  cp "$CHIA_ROOT/config/ssl/ca/private_ca.key" /network-ca/
-  chmod 600 /network-ca/private_ca.key
 fi
 python /app/docker/private-network/configure.py
 

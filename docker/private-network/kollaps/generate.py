@@ -18,7 +18,6 @@ def adapt_stack(stack: dict, plot_count: int) -> dict:
     stack["volumes"] = {
         f"{node}-data": {"external": True, "name": f"chia-kollaps-{node}-data"} for node in NODES
     }
-    stack["volumes"]["network-ca"] = {"external": True, "name": "chia-kollaps-network-ca"}
     for service in services.values():
         service["environment"] = {key: str(value) for key, value in service.get("environment", {}).items()}
         # Host-local volumes require a single manager. The supplied integration
@@ -30,10 +29,7 @@ def adapt_stack(stack: dict, plot_count: int) -> dict:
             if service["deploy"]["replicas"] != 1 or service["deploy"]["endpoint_mode"] != "dnsrr":
                 raise ValueError(f"Expected one DNSRR task for {node}")
             service["environment"]["PLOT_COUNT"] = str(plot_count)
-            service["volumes"] = [
-                f"{node}-data:/data",
-                "network-ca:/network-ca" + ("" if node == "timelord" else ":ro"),
-            ]
+            service["volumes"] = [f"{node}-data:/data"]
             service["stop_grace_period"] = "60s"
     if found != NODES:
         raise ValueError(f"Expected exactly four Chia services, found {sorted(found)}")

@@ -33,7 +33,8 @@ by the global TPS interval. This relies on a single native Linux Docker host,
 where the coordinator and containers share the monotonic clock. Do not use
 a remote Docker context for this launcher.
 
-Host results are saved under `results/transactions/<run-id>/`:
+By default, host results are saved under `results/transactions/<run-id>/`,
+relative to the working directory; use `--output-dir` to change this:
 
 - `manifest.json`: parameters, seed, wallets, containers, start time and status.
 - `farmer-1.jsonl`, `farmer-2.jsonl`, `farmer-3.jsonl`: worker event logs.
@@ -74,8 +75,6 @@ docker exec <sender-farmer-id> python /app/docker/private-network/generate_trans
 ```
 
 Replace `txch1...` with the complete address printed by the first command.
-For Compose, replace `docker exec <id>` with
-`docker compose -f docker/private-network/compose.yaml exec -T farmer-1`.
 Run only one generator per sender wallet. Use another farmer's address for
 transfers between wallets; a self-transfer is possible only by explicitly
 supplying the sender's own address. Repeat `--recipient` to vary destinations
@@ -145,15 +144,8 @@ add their rates; use `run_transactions.py` to coordinate a global TPS budget.
 Keep preparation and workload
 settings identical when comparing network configurations.
 
-## Local checks
+## Validation status
 
-From the repository root, without Docker:
-
-```bash
-tools/py -m unittest discover -s docker/private-network/tests -p 'test_*transactions.py' -v
-```
-
-These use simulated RPC responses to check scheduling, independent inputs,
-coin preparation, ambiguous failures, final confirmation verification, global
-slot allocation, destination selection, and real coordinator subprocess pipes.
-End-to-end wallet submission must still be tested on the dedicated machine.
+There is currently no transaction test suite under `docker/private-network/`.
+End-to-end wallet submission and coordinated workloads must be verified on
+the dedicated machine before collecting experimental results.

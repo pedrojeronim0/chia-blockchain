@@ -16,7 +16,7 @@ if [[ $(docker node ls --format '{{.ID}}' | wc -l) -ne 1 ]]; then
   echo "This integration currently requires a single-node Swarm" >&2
   exit 1
 fi
-if docker stack services chia-kollaps --format '{{.Name}}' 2>/dev/null | rg -q .; then
+if docker stack services chia-kollaps --format '{{.Name}}' 2>/dev/null | grep -q .; then
   echo "Remove the existing chia-kollaps stack before preparing another experiment" >&2
   exit 1
 fi
@@ -32,18 +32,6 @@ fi
 for node in timelord farmer-1 farmer-2 farmer-3; do
   docker volume create "chia-kollaps-$node-data" >/dev/null
 done
-docker volume create chia-kollaps-network-ca >/dev/null
-
-# Provision the timelord's CA before all four applications start concurrently.
-docker run --rm --network none --entrypoint bash \
-  -v chia-kollaps-timelord-data:/data -v chia-kollaps-network-ca:/network-ca \
-  chia-private-kollaps:local -c '
-    set -euo pipefail
-    if [[ ! -f "$CHIA_ROOT/config/config.yaml" ]]; then chia init; fi
-    cp "$CHIA_ROOT/config/ssl/ca/private_ca.crt" /network-ca/
-    cp "$CHIA_ROOT/config/ssl/ca/private_ca.key" /network-ca/
-    chmod 600 /network-ca/private_ca.key
-  '
 
 generated_stack=$(mktemp "$integration_dir/stack.XXXXXX")
 trap 'rm -f "$generated_stack"' EXIT

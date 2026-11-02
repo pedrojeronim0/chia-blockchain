@@ -16,7 +16,7 @@ traffic stays on loopback inside each container.
 
 Run the following commands on the dedicated machine, from this Chia repository's
 root. Use x86_64 Linux with a kernel newer than 5.15, Docker Engine, Swarm support,
-`git`, and `rg`. Kollaps requires kernel traffic control and eBPF support.
+`git`, and `grep`. Kollaps requires kernel traffic control and eBPF support.
 The Kollaps images are built from its official Dockerfiles, without local
 Docker Desktop or WSL adaptations.
 
@@ -37,17 +37,16 @@ On a dedicated Docker host, initialize Swarm if it is not already active:
 docker swarm init
 ```
 
-Do not run the standalone Compose network during measurements: it competes
-for CPU with the experiment. Stop it while preserving its data:
+Stop other experimental workloads on the host before measurements to avoid
+resource contention. Prepare and deploy the stack:
 
 ```bash
-docker compose -f docker/private-network/compose.yaml down
 bash docker/private-network/kollaps/prepare.sh
 docker stack deploy --resolve-image never -c docker/private-network/kollaps/stack.yaml chia-kollaps
 docker stack services chia-kollaps
 ```
 
-`prepare.sh` provisions a shared CA, creates separate `chia-kollaps-*` volumes,
+`prepare.sh` prepares the Docker network, creates separate `chia-kollaps-*` data volumes,
 and runs the official Kollaps deployment generator. It then adds Chia volumes
 and plot counts while preserving Kollaps' UUID, labels, paused entrypoints,
 and DNSRR endpoints. Kollaps mounts `topology.xml` from its absolute path on
@@ -55,8 +54,8 @@ the dedicated host, following the upstream deployment mechanism. Keep this
 repository at that path while the experiment is deployed. Generate `stack.yaml`
 on the dedicated machine; do not copy a stack generated on another host.
 
-The standalone Compose volumes are not reused or deleted. To choose another
-plot count, use `PLOT_COUNT=64 bash docker/private-network/kollaps/prepare.sh`.
+To choose another plot count, use
+`PLOT_COUNT=64 bash docker/private-network/kollaps/prepare.sh`.
 The script refuses to prepare an already deployed experiment or a multi-node
 Swarm. Run one Kollaps experiment at a time on this Docker host.
 
@@ -70,7 +69,16 @@ ssh -L 8088:localhost:8088 user@dedicated-host
 
 With the tunnel, open **http://localhost:8088**. Wait until all four Chia containers show ready,
 then click **Start**. Kollaps holds the application entrypoints until this
-point. Creating plots on a fresh volume takes additional time after Start.
+point. All four Chia nodes use `chia-private:local`, whose entrypoint is
+the shared `../entrypoint.sh`; it receives
+the role and node name, checks the experiment UUID, initializes each node's
+own private CA and certificates on first startup, configures Chia, and starts
+the services. Creating plots on a fresh volume takes
+additional time after Start.
+Existing data volumes retain their current certificates, including any CA
+imported by an earlier deployment; this change does not rotate certificates.
+Fresh data volumes generate independent private CAs. The old shared CA volume
+is no longer mounted or used and is not deleted automatically.
 For measured runs, prepare plots in a warm-up run, then remove and redeploy
 the stack with its volumes preserved.
 
