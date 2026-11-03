@@ -91,6 +91,13 @@ plus fee, so measured transfers use one input and one output without change.
 Preparation transactions are confirmed in batches before measurement; they
 are logged separately and must not be counted as workload transactions.
 Earlier prepared outputs are excluded from subsequent preparation spends.
+Before each preparation batch, the worker waits for wallet synchronization.
+If the wallet explicitly rejects the request because it became unsynced, the
+worker waits and retries within `--timeout`. This rejection occurs before
+transaction construction. Transport errors and other submission failures are
+not retried. The final spendable-coin check also waits and retries within
+`--timeout` if the wallet explicitly reports that it is not fully synced.
+Synchronization waits are logged as `preparation_sync_wait`.
 
 Farming rewards must be available first. Preparation can take several blocks
 and many wallet RPC calls; it is excluded from `--duration`. Use `--timeout`

@@ -76,6 +76,15 @@ Each node's local services use its own private CA. Full-node peer connections
 use Chia's bundled public CA and do not require sharing private CAs.
 Coins and k19 plots are exclusively for this test network.
 
+The network uses `DIFFICULTY_CONSTANT_FACTOR = 2**34`.
+With the default 96 k19 plots, difficulty 1024, sub-slot iterations 1048576,
+and a 1-bit filter, this gives approximately 0.46 eligible proofs per signage
+point (29 per sub-slot). This estimates eligibility, not achieved block rate;
+changing the plot count changes the estimate.
+The earlier configuration used `2**25`, making all found qualities eligible
+after the filter. Reset the test network data before deploying this changed
+consensus constant. Rebuilding the image does not reset existing volumes.
+
 The default of 32 plots per farmer provides an equal initial space allocation
 for comparing the three farmers. For Kollaps, set the count when preparing
 the experiment:

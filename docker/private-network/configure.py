@@ -19,7 +19,9 @@ def main() -> None:
         "GENESIS_CHALLENGE": challenge,
         "AGG_SIG_ME_ADDITIONAL_DATA": challenge,
         "MIN_PLOT_SIZE_V1": 19,
-        "DIFFICULTY_CONSTANT_FACTOR": 33554432,
+        # With 96 k19 plots and a 1-bit filter, target roughly 0.46 eligible
+        # proofs per signage point (29 per sub-slot), before runtime effects.
+        "DIFFICULTY_CONSTANT_FACTOR": 17179869184,
         "DIFFICULTY_STARTING": 1024,
         "SUB_SLOT_ITERS_STARTING": 1048576,
         "NUMBER_ZERO_BITS_PLOT_FILTER_V1": 1,

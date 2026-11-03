@@ -17,7 +17,7 @@ import aiohttp
 from chia_rs import Coin
 from chia_rs.sized_ints import uint16
 
-from chia.rpc.rpc_client import RpcClient
+from chia.rpc.rpc_client import ResponseFailureError, RpcClient
 from chia.util.bech32m import decode_puzzle_hash
 from chia.util.config import load_config
 from chia.util.task_referencer import create_referenced_task
@@ -138,6 +138,26 @@ async def wait_confirmed(client: RpcClient, tx_id: str, args: argparse.Namespace
         await asyncio.sleep(args.poll_interval)
 
 
+async def submit_preparation(
+    client: RpcClient, args: argparse.Namespace, request: dict, emit: Emit
+) -> dict:
+    deadline = time.monotonic() + args.timeout
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Wallet did not stay synced long enough to submit a preparation batch")
+        status = await client.fetch("get_sync_status", {})
+        if status["synced"]:
+            try:
+                return await client.fetch("send_transaction_multi", request)
+            except ResponseFailureError as error:
+                # tx_endpoint rejects this request before constructing or pushing
+                # a transaction. Transport errors and other failures are ambiguous.
+                if error.response.get("error") != "Wallet needs to be fully synced before making transactions.":
+                    raise
+        emit("preparation_sync_wait")
+        await asyncio.sleep(min(args.poll_interval, max(0, deadline - time.monotonic())))
+
+
 async def prepare_coins(client: RpcClient, args: argparse.Namespace, emit: Emit) -> list[dict]:
     count = len(assigned_slots(args))
     coin_amount = args.amount_mojos + args.fee_mojos
@@ -153,8 +173,9 @@ async def prepare_coins(client: RpcClient, args: argparse.Namespace, emit: Emit)
             hashes.append(decode_puzzle_hash(address).hex())
         if len(set(hashes)) != batch:
             raise ValueError("Wallet returned duplicate preparation addresses")
-        response = await client.fetch(
-            "send_transaction_multi",
+        response = await submit_preparation(
+            client,
+            args,
             {
                 "wallet_id": 1,
                 "additions": [{"puzzle_hash": ph, "amount": coin_amount} for ph in hashes],
@@ -162,6 +183,7 @@ async def prepare_coins(client: RpcClient, args: argparse.Namespace, emit: Emit)
                 "fee": 0,
                 "push": True,
             },
+            emit,
         )
         tx_id = response["transaction_id"]
         emit("preparation_submitted", transaction_id=tx_id, outputs=batch)
@@ -178,10 +200,16 @@ async def prepare_coins(client: RpcClient, args: argparse.Namespace, emit: Emit)
     deadline = time.monotonic() + args.timeout
     expected = {Coin.from_json_dict(coin).name() for coin in pool}
     while True:
-        response = await client.fetch("get_spendable_coins", {"wallet_id": 1})
-        available = {Coin.from_json_dict(record["coin"]).name() for record in response["confirmed_records"]}
-        if expected <= available:
-            return pool
+        try:
+            response = await client.fetch("get_spendable_coins", {"wallet_id": 1})
+        except ResponseFailureError as error:
+            if error.response.get("error") != "Wallet needs to be fully synced before getting all coins":
+                raise
+            emit("preparation_sync_wait")
+        else:
+            available = {Coin.from_json_dict(record["coin"]).name() for record in response["confirmed_records"]}
+            if expected <= available:
+                return pool
         if time.monotonic() >= deadline:
             raise TimeoutError("Prepared coins have not all become spendable in the wallet")
         await asyncio.sleep(args.poll_interval)
