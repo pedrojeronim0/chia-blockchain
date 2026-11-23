@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -49,9 +50,12 @@ def main() -> None:
     node["introducer_peer"] = None
     node_name = os.environ.get("NODE_NAME", "timelord")
     experiment = os.environ.get("KOLLAPS_UUID")
+    nodes = json.loads(os.environ["CHIA_NODES"])
+    if nodes.get(node_name) != role:
+        raise ValueError("Node name/role does not match topology metadata")
     node["full_node_peers"] = [
         {"host": f"{host}-{experiment}" if experiment else host, "port": 8444}
-        for host in ("timelord", "farmer-1", "farmer-2", "farmer-3")
+        for host in nodes
         if host != node_name
     ]
     config["farmer"]["full_node_peers"] = [{"host": "localhost", "port": 8444}]

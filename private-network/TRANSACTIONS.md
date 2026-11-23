@@ -11,23 +11,27 @@ For a coordinated workload, run this **on the dedicated Linux machine** after
 starting Chia in the Kollaps dashboard:
 
 ```bash
-python3 docker/private-network/run_transactions.py \
+python3 private-network/run_transactions.py \
   --stack chia-kollaps --tps 30 --duration 300 --seed 42
 ```
 
-This requests **30 TPS globally**, approximately 10 TPS from each wallet.
-The launcher discovers the farmer containers and wallet addresses. Senders
-take turns in a single global schedule: farmer-1, farmer-2, farmer-3, then
+This requests **30 TPS globally**, approximately 30/N TPS from each of N wallets (10 TPS with 3 farmers).
+The launcher discovers farmer containers and wallet addresses, validates the
+deployed topology metadata, and sorts farmers numerically. Standalone
+`full-node-*` containers participate in network propagation but are excluded
+from transaction workers and recipients. At least two farmers
+and one planned transfer per farmer are required. Senders
+take turns in numeric order: farmer-1 through farmer-N, then
 repeat. Slots are allocated without overlap, even when the total transfer
-count is not divisible by three.
+count is not divisible by N.
 
-Each sender varies its recipient between the other two wallets, using seeded,
-shuffled pairs. Planned destination counts differ by at most one per sender;
+Each sender varies its recipient between the other N-1 wallets, using seeded,
+shuffled batches. Planned destination counts differ by at most one per sender;
 skipped sends can change the observed distribution. There are no self-transfers.
 The seed repeats recipient choices and sender order, not keys, coin IDs or
 confirmation timing.
 
-Each worker prepares only its assigned number of coins. All three must report
+Each worker prepares only its assigned number of coins. All workers must report
 ready before the launcher releases a common start timestamp. Slots are staggered
 by the global TPS interval. This relies on a single native Linux Docker host,
 where the coordinator and containers share the monotonic clock. Do not use
@@ -37,7 +41,7 @@ By default, host results are saved under `results/transactions/<run-id>/`,
 relative to the working directory; use `--output-dir` to change this:
 
 - `manifest.json`: parameters, seed, wallets, containers, start time and status.
-- `farmer-1.jsonl`, `farmer-2.jsonl`, `farmer-3.jsonl`: worker event logs.
+- `farmer-<index>.jsonl`: one worker event log per farmer.
 - `summary.json`: individual totals and aggregate submission rates.
 
 Workers also save `/data/transactions/<run-id>.jsonl` inside their containers.
@@ -58,14 +62,14 @@ docker ps --filter label=com.docker.stack.namespace=chia-kollaps
 Obtain a receive address from the destination farmer's wallet:
 
 ```bash
-docker exec <recipient-farmer-id> python /app/docker/private-network/generate_transactions.py --print-address
+docker exec <recipient-farmer-id> python /app/private-network/generate_transactions.py --print-address
 ```
 
 Pass that address to the sender. For example, request 10 transactions/second
 for a 300-second submission window:
 
 ```bash
-docker exec <sender-farmer-id> python /app/docker/private-network/generate_transactions.py \
+docker exec <sender-farmer-id> python /app/private-network/generate_transactions.py \
   --recipient txch1... \
   --tps 10 \
   --duration 300 \
@@ -99,6 +103,13 @@ not retried. The final spendable-coin check also waits and retries within
 `--timeout` if the wallet explicitly reports that it is not fully synced.
 Synchronization waits are logged as `preparation_sync_wait`.
 
+After preparing coins, each worker constructs and signs every measured
+transfer through the wallet with `push=false`. No workload transfer is
+broadcast during this stage. Each signed bundle is checked to spend exactly
+its assigned input and create the expected recipient output. `transfer_signed`
+events record the bundle ID and input/output coin IDs. The ready barrier is
+released only after all transfers have been signed.
+
 Farming rewards must be available first. Preparation can take several blocks
 and many wallet RPC calls; it is excluded from `--duration`. Use `--timeout`
 to increase the per-wait preparation limit (default: 600 seconds). A failed
@@ -106,11 +117,12 @@ preparation can leave coins and transactions in the wallet; another run makes
 a new pool rather than resuming the previous one.
 
 During measurement, a monotonic-clock schedule submits transfers at the
-requested TPS. `--max-inflight` limits concurrent submission RPC calls
+requested TPS using the local full node's `push_tx`, without wallet RPC calls.
+`--max-inflight` limits concurrent submission RPC calls
 (default: 8). Confirmation polling runs concurrently. The generator does not
 wait for each transfer to confirm before sending another. Missed slots and
 capacity-limited slots are logged and skipped, rather than sent in a catch-up
-burst. A failed submission is never automatically retried because the wallet
+burst. A failed submission is never automatically retried because the full node
 may already have accepted it. Each prepared input is used at most once.
 
 After the submission window, outstanding submission RPC calls settle and
@@ -137,15 +149,20 @@ successful-submission rates. RPC failures have an unknown-or-rejected outcome;
 they are not proof that the transaction was never broadcast.
 
 These rates describe the generator, not the network's confirmed throughput.
-Confirmation timestamps are wallet polling observations, with block heights;
-they are not exact block arrival or inclusion times. Mempool acceptance is
-observed from the wallet's peer acknowledgements. Final verification errors
+Confirmation timestamps are full-node polling observations, with block heights;
+they are not exact block arrival or inclusion times. Confirmation requires the
+expected output to exist and the input to be spent at the same height. Scans
+are batched and discarded if the chain peak changes during the scan.
+Mempool acceptance is observed from `push_tx` returning `SUCCESS`.
+Transaction IDs now identify signed spend bundles, not wallet history records.
+Final verification errors
 remain explicit, and a reorg after the run can still change the chain.
 Use the transaction IDs and confirmation heights with canonical chain data
 for throughput analysis. Block propagation instrumentation is separate.
 
-Wallet construction/signing, confirmation polling, RPC capacity, and logging
-can limit achieved TPS. Compare requested TPS with actual submission rates
+Wallet construction/signing happens before measurement. Full-node validation,
+confirmation polling, RPC capacity, and logging can still limit achieved TPS.
+Compare requested TPS with actual submission rates
 before attributing saturation to the network. Independent single-sender runs
 add their rates; use `run_transactions.py` to coordinate a global TPS budget.
 Keep preparation and workload
@@ -153,6 +170,8 @@ settings identical when comparing network configurations.
 
 ## Validation status
 
-There is currently no transaction test suite under `docker/private-network/`.
+`tests/test_topology.py` covers topology-derived peer configuration, volumes,
+and farmer discovery. Run it from the repository root with
+`tools/pytest -o addopts='' private-network/tests/test_topology.py -q`.
 End-to-end wallet submission and coordinated workloads must be verified on
 the dedicated machine before collecting experimental results.

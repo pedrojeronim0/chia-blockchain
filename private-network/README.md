@@ -1,17 +1,16 @@
 # Private Chia network with Docker
 
-Private test network with **4 Chia containers and 4 full nodes**, intended to
+Private test network with **N farmers, M standalone full nodes, and one timelord** (as declared in `kollaps/topology.xml`), intended to
 run with **Kollaps on a single dedicated Linux machine using Docker Swarm**.
 
 | Container | Services |
 | --- | --- |
 | `timelord` | full node, timelord, and VDF launcher |
-| `farmer-1` | full node, farmer, harvester, and wallet |
-| `farmer-2` | full node, farmer, harvester, and wallet |
-| `farmer-3` | full node, farmer, harvester, and wallet |
+| `farmer-1` … `farmer-N` | full node, farmer, harvester, and wallet |
+| `full-node-1` … `full-node-M` | full node only |
 
 Each farmer has an independent key and 32 k19 plots generated on first startup
-(96 plots across the network). Only `/data/plots/k19` is configured for farming.
+(32 plots times the number of farmers). Only `/data/plots/k19` is configured for farming.
 On restart, each farmer creates any plots missing from its target count.
 `plot.py` uses Chia's plotting API because the CLI enforces a minimum of k25.
 The full nodes connect to each other; each farmer and the timelord use their local full node.
@@ -29,9 +28,9 @@ deploying the services, and starting the experiment from the dashboard.
 
 Swarm runs the containers. Kollaps starts the Chia applications and applies
 the network conditions defined in [topology.xml](kollaps/topology.xml).
-The default topology provides 100 Mbps access links and 10 ms one-way latency
+The supplied topology provides 1 Mbps access links and 10 ms one-way latency
 between nodes. Kollaps also runs a dashboard and bootstrapper alongside the
-four Chia containers, plus a privileged emulation container.
+N + M + 1 Chia containers, plus a privileged emulation container.
 
 The deployment files are:
 
@@ -47,7 +46,7 @@ path to the topology. End-to-end operation must be verified on that machine.
 
 ## Application startup
 
-All four Chia nodes use the `chia-private:local` image and the single
+All Chia nodes use the `chia-private:local` image and the single
 `entrypoint.sh` in this directory. Kollaps
 launches it with the role and node name from `kollaps/topology.xml` after
 **Start** is selected in the dashboard. It requires `KOLLAPS_UUID`.
@@ -55,12 +54,12 @@ On first startup, each node runs `chia init` to generate its own private CA
 and service certificates in its persistent data volume.
 
 For each application startup, the entrypoint runs `configure.py`, creates
-missing plots on farmers, and starts the Chia daemon and services. The four
+missing plots on farmers, and starts the Chia daemon and services. The
 nodes each run their own copy against their own persistent volume.
 
 The build compiles the VDF client and may take some time. Farmers create their
 plots before starting services. Allocate several CPU cores for the timelord
-and the three concurrent plotters. Block production is probabilistic;
+and the concurrent plotters. Block production is probabilistic;
 there is no guaranteed block interval, especially at startup.
 
 See the Kollaps guide for verification and shutdown commands.
@@ -86,12 +85,19 @@ after the filter. Reset the test network data before deploying this changed
 consensus constant. Rebuilding the image does not reset existing volumes.
 
 The default of 32 plots per farmer provides an equal initial space allocation
-for comparing the three farmers. For Kollaps, set the count when preparing
+for comparing farmers. For Kollaps, set the count when preparing
 the experiment:
 
 ```bash
-PLOT_COUNT=64 bash docker/private-network/kollaps/prepare.sh
+PLOT_COUNT=64 bash private-network/kollaps/prepare.sh
 ```
+
+Define the nodes and their network links directly in `kollaps/topology.xml`.
+Each service's command declares its role (`farmer`, `timelord`, or `full_node`)
+and node name. Preparation derives persistent volumes and peer names from
+those services; no node-count environment variables are needed. Standalone
+full nodes validate and relay blocks/transactions without farmers or wallets,
+and do not participate as transaction senders or recipients.
 
 Lowering the target does not delete plots already created. Plot count controls
 the amount of space allocated; it does not guarantee a particular block rate.
@@ -107,5 +113,5 @@ the network and its volumes.
 Each farmer also runs a wallet connected to its local full node, using its
 existing key to receive and spend farming rewards. The transaction workload
 is started explicitly; see [transaction generation](TRANSACTIONS.md).
-For varying senders and recipients, `run_transactions.py` coordinates the three
+For varying senders and recipients, `run_transactions.py` discovers and coordinates all
 farmer wallets with a global TPS target and a reproducible destination schedule.

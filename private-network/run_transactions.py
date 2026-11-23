@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -11,8 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-FARMERS = ("farmer-1", "farmer-2", "farmer-3")
-SCRIPT = "/app/docker/private-network/generate_transactions.py"
+SCRIPT = "/app/private-network/generate_transactions.py"
 
 
 def discover_containers(stack: str) -> dict[str, str]:
@@ -24,29 +24,44 @@ def discover_containers(stack: str) -> dict[str, str]:
         raise ValueError(f"No running containers found for stack {stack}")
     containers = json.loads(subprocess.check_output(["docker", "inspect", *ids], text=True))
     result = {}
+    topologies = set()
     for container in containers:
+        env = dict(item.split("=", 1) for item in container["Config"].get("Env", []) if "=" in item)
+        if "CHIA_NODES" not in env:
+            continue
+        nodes = json.loads(env["CHIA_NODES"])
+        topologies.add(json.dumps(nodes, sort_keys=True))
         name = container["Config"]["Hostname"]
-        if name in FARMERS:
+        if nodes.get(name) == "farmer":
             if name in result:
                 raise ValueError(f"Multiple containers for {name}; wait for Swarm to converge")
             result[name] = container["Id"]
-    if set(result) != set(FARMERS):
-        raise ValueError(f"Expected {FARMERS}, found {sorted(result)}")
-    return result
+    if len(topologies) != 1:
+        raise ValueError("Missing or inconsistent topology metadata; rebuild and redeploy the stack")
+    nodes = json.loads(topologies.pop())
+    expected = {name for name, role in nodes.items() if role == "farmer"}
+    if set(result) != expected:
+        raise ValueError(f"Expected farmers {sorted(expected)}, found {sorted(result)}")
+
+    def natural_key(name: str) -> list:
+        return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name)]
+
+    return dict(sorted(result.items(), key=lambda item: natural_key(item[0])))
 
 
 def worker_command(args: argparse.Namespace, container: str, index: int, addresses: dict[str, str], run_id: str) -> list[str]:
+    farmers = tuple(addresses)
     command = [
         "docker", "exec", "-i", container, "python", SCRIPT,
-        "--coordinated", "--sender-index", str(index), "--sender-count", str(len(FARMERS)),
+        "--coordinated", "--sender-index", str(index), "--sender-count", str(len(farmers)),
         "--tps", str(args.tps), "--duration", str(args.duration), "--seed", str(args.seed),
         "--run-id", run_id, "--amount-mojos", str(args.amount_mojos), "--fee-mojos", str(args.fee_mojos),
         "--timeout", str(args.wallet_timeout), "--drain-timeout", str(args.drain_timeout),
         "--max-inflight", str(args.max_inflight), "--prepare-batch-size", str(args.prepare_batch_size),
         "--output", f"/data/transactions/{run_id}.jsonl",
     ]
-    for farmer in FARMERS:
-        if farmer != FARMERS[index]:
+    for farmer in farmers:
+        if farmer != farmers[index]:
             command.extend(["--recipient", addresses[farmer]])
     return command
 
@@ -62,15 +77,20 @@ def aggregate(summaries: dict[str, dict], duration: float, tps: float, run_id: s
 
 def run(args: argparse.Namespace) -> Path:
     containers = discover_containers(args.stack)
+    farmers = tuple(containers)
+    if len(farmers) < 2:
+        raise ValueError("Coordinated transfers require at least two farmers")
+    if math.ceil(args.tps * args.duration) < len(farmers):
+        raise ValueError("The global workload must contain at least one transfer per farmer")
     addresses = {}
-    for farmer in FARMERS:
+    for farmer in farmers:
         addresses[farmer] = subprocess.check_output(
             ["docker", "exec", containers[farmer], "python", SCRIPT, "--print-address",
              "--timeout", str(args.wallet_timeout)], text=True, timeout=args.wallet_timeout + 60,
         ).strip()
         if not addresses[farmer].startswith("txch1") or any(c.isspace() for c in addresses[farmer]):
             raise ValueError(f"Invalid wallet address returned by {farmer}")
-    if len(set(addresses.values())) != len(FARMERS):
+    if len(set(addresses.values())) != len(farmers):
         raise ValueError("Farmers must have distinct wallets and receive addresses")
     run_id = str(uuid.uuid4())
     output = args.output_dir / run_id
@@ -78,7 +98,9 @@ def run(args: argparse.Namespace) -> Path:
     manifest = {"run_id": run_id, "global_target_tps": args.tps, "duration_seconds": args.duration,
                 "seed": args.seed, "containers": containers, "addresses": addresses,
                 "amount_mojos": args.amount_mojos, "fee_mojos": args.fee_mojos,
-                "sender_order": FARMERS, "status": "preparing"}
+                "sender_order": farmers, "status": "preparing",
+                "submission_mode": "presigned_full_node_rpc", "max_inflight": args.max_inflight,
+                "prepare_batch_size": args.prepare_batch_size, "drain_timeout": args.drain_timeout}
     manifest_path = output / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     events: queue.Queue = queue.Queue()
@@ -115,7 +137,7 @@ def run(args: argparse.Namespace) -> Path:
 
     try:
         deadline = time.monotonic() + args.preparation_timeout
-        for index, farmer in enumerate(FARMERS):
+        for index, farmer in enumerate(farmers):
             process = subprocess.Popen(worker_command(args, containers[farmer], index, addresses, run_id),
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, bufsize=1)
@@ -124,11 +146,11 @@ def run(args: argparse.Namespace) -> Path:
             thread.start()
             readers.append(thread)
         ready = set()
-        while len(ready) < len(FARMERS):
+        while len(ready) < len(farmers):
             farmer, event = receive(deadline)
             if event["event"] == "ready":
                 ready.add(farmer)
-                print(f"{farmer}: ready with {event['prepared']} coins", flush=True)
+                print(f"{farmer}: ready with {event['prepared']} signed transfers", flush=True)
         # All containers share the dedicated Linux host's monotonic clock.
         start_at = time.monotonic() + args.start_delay
         manifest.update(status="running", start_monotonic=start_at)
@@ -137,11 +159,11 @@ def run(args: argparse.Namespace) -> Path:
         for process in processes.values():
             process.stdin.write(command)
             process.stdin.flush()
-        print(f"Run {run_id}: {args.tps} TPS globally across three wallets; logs: {output}", flush=True)
+        print(f"Run {run_id}: {args.tps} TPS globally across {len(farmers)} wallets; logs: {output}", flush=True)
         summaries = {}
         # Includes RPC settlement and final per-transaction verification.
         deadline = start_at + args.duration + args.drain_timeout + args.completion_timeout
-        while len(summaries) < len(FARMERS):
+        while len(summaries) < len(farmers):
             farmer, event = receive(deadline)
             if event["event"] == "summary":
                 summaries[farmer] = event
@@ -178,9 +200,9 @@ def run(args: argparse.Namespace) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Coordinate three Chia farmer wallets with a global TPS budget")
+    parser = argparse.ArgumentParser(description="Coordinate Chia farmer wallets with a global TPS budget")
     parser.add_argument("--stack", default="chia-kollaps")
-    parser.add_argument("--tps", type=float, default=30, help="Global TPS, shared by all three senders")
+    parser.add_argument("--tps", type=float, default=30, help="Global TPS, shared by all senders")
     parser.add_argument("--duration", type=float, default=300)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--amount-mojos", type=int, default=1_000_000)
@@ -197,8 +219,8 @@ def parse_args() -> argparse.Namespace:
     for field in ("tps", "duration", "wallet_timeout", "preparation_timeout", "drain_timeout", "completion_timeout", "start_delay"):
         if not math.isfinite(getattr(args, field)) or getattr(args, field) <= 0:
             parser.error(f"{field} must be finite and positive")
-    if not math.isfinite(args.tps * args.duration) or args.tps * args.duration < 3:
-        parser.error("the global workload must contain at least three transfers")
+    if not math.isfinite(args.tps * args.duration) or args.tps * args.duration <= 0:
+        parser.error("the global workload must be finite and positive")
     if args.amount_mojos < 1 or args.fee_mojos < 0 or args.amount_mojos + args.fee_mojos >= 2**64:
         parser.error("invalid amount or fee")
     if args.max_inflight < 1 or not 1 <= args.prepare_batch_size <= 500:

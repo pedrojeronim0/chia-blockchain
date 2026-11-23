@@ -1,12 +1,12 @@
 # Chia with Kollaps
 
 This deployment targets a **single dedicated Linux machine running Docker Swarm**.
-Each of the four Chia nodes has one container, one overlay-network IP, and its
+Each of the Chia nodes has one container, one overlay-network IP, and its
 own data volume. Each farmer creates and loads 32 k19 plots by default.
 Each farmer also runs a wallet for its existing key. To generate timed
 transaction workloads, follow the [transaction generator guide](../TRANSACTIONS.md).
 
-The supplied topology emulates a switch with a bidirectional 100 Mbps link and
+The supplied topology emulates a switch with a bidirectional 1 Mbps link and
 5 ms latency to each node. A node-to-node path has 10 ms one-way latency
 (approximately 20 ms network RTT). Chia peers still form a full mesh; the
 emulated network paths go through the switch. Local farmer/harvester/timelord
@@ -22,7 +22,7 @@ Docker Desktop or WSL adaptations.
 
 ```bash
 git clone --branch master --depth 1 --recurse-submodules https://github.com/miguelammatos/Kollaps.git ../Kollaps
-bash docker/private-network/kollaps/build.sh ../Kollaps
+bash private-network/kollaps/build.sh ../Kollaps
 ```
 
 The source inspected for this integration was revision
@@ -41,8 +41,8 @@ Stop other experimental workloads on the host before measurements to avoid
 resource contention. Prepare and deploy the stack:
 
 ```bash
-bash docker/private-network/kollaps/prepare.sh
-docker stack deploy --resolve-image never -c docker/private-network/kollaps/stack.yaml chia-kollaps
+bash private-network/kollaps/prepare.sh
+docker stack deploy --resolve-image never -c private-network/kollaps/stack.yaml chia-kollaps
 docker stack services chia-kollaps
 ```
 
@@ -54,8 +54,36 @@ the dedicated host, following the upstream deployment mechanism. Keep this
 repository at that path while the experiment is deployed. Generate `stack.yaml`
 on the dedicated machine; do not copy a stack generated on another host.
 
-To choose another plot count, use
-`PLOT_COUNT=64 bash docker/private-network/kollaps/prepare.sh`.
+`topology.xml` is the source of truth for nodes and network conditions. The
+preparation script reads it without rewriting it. Each non-supervisor service
+must declare a unique node name and a command with its role and matching name:
+
+```xml
+<service name="farmer-5" image="chia-private:local" command="['farmer', 'farmer-5']"/>
+<service name="full-node-3" image="chia-private:local" command="['full_node', 'full-node-3']"/>
+```
+
+Add a link for each new service under `<links>`, choosing its own conditions:
+
+```xml
+<link origin="full-node-3" dest="switch" latency="5" upload="1Mbps" download="1Mbps" network="kollaps_network"/>
+```
+
+Supported Chia roles are `farmer`, `timelord`, and `full_node`. Declare one
+service per node (`replicas` must be 1), so each has its own identity and volume.
+Node names need not be sequential. The script derives volumes and distributes
+the complete node/role map for Chia peer configuration and transaction discovery.
+Standalone full nodes run only `chia start node`, without farming or wallets.
+`FARMER_COUNT` and `FULL_NODE_COUNT` are no longer used; add/remove services and
+links in the XML instead. There is no intermediate generated topology.
+
+Plot quantity remains separate: `PLOT_COUNT=64 bash private-network/kollaps/prepare.sh`
+sets 64 k19 plots per farmer (default 32); plot size remains fixed at k19.
+Rebuild the Chia image and regenerate/redeploy the stack to apply this change.
+Removing nodes retains their existing volumes. A coordinated transaction run
+requires at least two farmers. Full-mesh peer connections grow quadratically;
+more plots also change proof eligibility with the fixed consensus settings.
+
 The script refuses to prepare an already deployed experiment or a multi-node
 Swarm. Run one Kollaps experiment at a time on this Docker host.
 
@@ -67,9 +95,9 @@ Open **http://<dedicated-host-ip>:8088**, or use an SSH tunnel:
 ssh -L 8088:localhost:8088 user@dedicated-host
 ```
 
-With the tunnel, open **http://localhost:8088**. Wait until all four Chia containers show ready,
+With the tunnel, open **http://localhost:8088**. Wait until all Chia containers show ready,
 then click **Start**. Kollaps holds the application entrypoints until this
-point. All four Chia nodes use `chia-private:local`, whose entrypoint is
+point. All Chia nodes use `chia-private:local`, whose entrypoint is
 the shared `../entrypoint.sh`; it receives
 the role and node name, checks the experiment UUID, initializes each node's
 own private CA and certificates on first startup, configures Chia, and starts
@@ -94,9 +122,10 @@ docker exec <container-id> chia peer full_node -c
 docker exec <container-id> chia rpc full_node get_blockchain_state
 ```
 
-Each full node should have three FULL_NODE peers. Each farmer should also
+With N farmers and M standalone full nodes, each full node should have
+N + M FULL_NODE peers. Each farmer should also
 have a local FARMER connection, and the timelord node a local TIMELORD
-connection. Compare peak height and hash across all four nodes after allowing
+connection. Compare peak height and hash across all nodes after allowing
 blocks to propagate. Check plot loading on the farmer containers:
 
 ```bash
@@ -104,6 +133,15 @@ docker exec <farmer-container-id> chia rpc farmer get_harvesters
 ```
 
 Container connectivity alone does not demonstrate that emulation is active.
+The upstream emulation core reports a path as active only when its sampled
+throughput exceeds 1% of that path's maximum bandwidth (`process_usage` in
+`kollaps/emulationcore/src/graph.rs`). For the supplied 1 Mbps paths, that is
+more than 10 Kbps per source/destination path. Chia's intermittent protocol
+traffic can remain below this threshold even while blocks propagate; an empty
+Active flows table alone does not establish that traffic capture has failed.
+The iperf3 example generates sustained traffic and is more likely to exceed
+this threshold. Do not lower experimental bandwidth just to populate the UI:
+that changes the experiment. Verify counters and observed latency separately.
 Check the `god_*` container logs for emulation-core failures and inspect the
 traffic-control rules in each node's network namespace before recording
 results. Validate observed latency/bandwidth against the XML topology.

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import aiohttp
-from chia_rs import Coin
+from chia_rs import Coin, SpendBundle
 from chia_rs.sized_ints import uint16
 
 from chia.rpc.rpc_client import ResponseFailureError, RpcClient
@@ -215,6 +215,56 @@ async def prepare_coins(client: RpcClient, args: argparse.Namespace, emit: Emit)
         await asyncio.sleep(args.poll_interval)
 
 
+async def prepare_transfers(client: RpcClient, args: argparse.Namespace, emit: Emit) -> list[dict]:
+    coins = await prepare_coins(client, args, emit)
+    transfers = []
+    for sequence, (coin, recipient) in enumerate(zip(coins, recipient_plan(args, len(coins))), 1):
+        response = await submit_preparation(client, args, {
+            "wallet_id": 1, "coins": [coin],
+            "additions": [{"puzzle_hash": decode_puzzle_hash(recipient).hex(), "amount": args.amount_mojos}],
+            "fee": args.fee_mojos, "push": False, "sign": True,
+        }, emit)
+        bundles = [SpendBundle.from_json_dict(tx["spend_bundle"])
+                   for tx in response["transactions"] if tx.get("spend_bundle") is not None]
+        if not bundles:
+            raise ValueError("Wallet returned no signed spend bundle")
+        bundle = SpendBundle.aggregate(bundles)
+        source = Coin.from_json_dict(coin)
+        expected = Coin(source.name(), decode_puzzle_hash(recipient), type(source.amount)(args.amount_mojos))
+        if bundle.removals() != [source] or bundle.additions() != [expected]:
+            raise ValueError("Signed transfer must spend exactly its assigned coin and create the expected output")
+        transfer = {"coin": coin, "recipient": recipient, "spend_bundle": bundle.to_json_dict(),
+                    "transaction_id": bundle.name().hex(), "input_id": source.name().hex(),
+                    "output_id": expected.name().hex()}
+        transfers.append(transfer)
+        emit("transfer_signed", sequence=sequence, transaction_id=transfer["transaction_id"],
+             input_id=transfer["input_id"], output_id=transfer["output_id"], recipient=recipient)
+    return transfers
+
+
+async def confirmed_heights(client: RpcClient, transfers: list[dict]) -> dict[str, int]:
+    """Check expected outputs and spent inputs on the full node, without wallet state."""
+    records = {}
+    names = [name for transfer in transfers for name in (transfer["input_id"], transfer["output_id"])]
+    before = (await client.fetch("get_blockchain_state", {}))["blockchain_state"]["peak"]
+    for offset in range(0, len(names), 200):
+        response = await client.fetch("get_coin_records_by_names", {
+            "names": names[offset:offset + 200], "include_spent_coins": True,
+        })
+        for record in response["coin_records"]:
+            records[Coin.from_json_dict(record["coin"]).name().hex()] = record
+    after = (await client.fetch("get_blockchain_state", {}))["blockchain_state"]["peak"]
+    if before != after:
+        raise RuntimeError("Chain peak changed during confirmation scan; retry on the next poll")
+    heights = {}
+    for transfer in transfers:
+        source = records.get(transfer["input_id"])
+        output = records.get(transfer["output_id"])
+        if source and output and source["spent_block_index"] == output["confirmed_block_index"] > 0:
+            heights[transfer["transaction_id"]] = output["confirmed_block_index"]
+    return heights
+
+
 async def generate(client: RpcClient, args: argparse.Namespace, coins: list[dict], emit: Emit,
                    start_at: float | None = None) -> dict:
     pending: dict[str, dict] = {}
@@ -227,7 +277,6 @@ async def generate(client: RpcClient, args: argparse.Namespace, coins: list[dict
     slots = assigned_slots(args)
     if len(slots) != len(coins):
         raise ValueError("Prepared coin count does not match assigned global slots")
-    recipients = recipient_plan(args, len(coins))
     sender_count = getattr(args, "sender_count", 1)
     sender_index = getattr(args, "sender_index", 0)
     if start_at is not None and time.monotonic() >= start_at:
@@ -243,48 +292,48 @@ async def generate(client: RpcClient, args: argparse.Namespace, coins: list[dict
             emit("schedule_skipped", sequence=sequence, reason="submission_window_closed")
             return
         attempted += 1
-        recipient = recipients[sequence - 1]
+        recipient = coin["recipient"]
         emit("attempted", sequence=sequence, global_sequence=slots[sequence - 1] + 1,
              recipient=recipient, scheduled_offset=scheduled - started,
              actual_offset=before - started, scheduling_delay_seconds=before - scheduled,
-             coin_id=Coin.from_json_dict(coin).name().hex())
+             coin_id=coin["input_id"], transaction_id=coin["transaction_id"])
         try:
             # One explicit, pre-funded input per transfer. Never reuse an input,
-            # even if RPC fails after the wallet may have accepted the request.
-            response = await client.fetch("send_transaction_multi", {
-                "wallet_id": 1, "coins": [coin],
-                "additions": [{"puzzle_hash": decode_puzzle_hash(recipient).hex(), "amount": args.amount_mojos}],
-                "fee": args.fee_mojos, "push": True,
-            })
-            tx_id = response["transaction_id"]
-            pending[tx_id] = {"sequence": sequence, "submitted": before, "accepted": False}
+            # even if RPC fails after the full node may have accepted the request.
+            response = await client.fetch("push_tx", {"spend_bundle": coin["spend_bundle"]})
+            if response.get("status") != "SUCCESS":
+                raise ValueError(f"Full node did not accept transaction: {response}")
+            tx_id = coin["transaction_id"]
+            pending[tx_id] = {"sequence": sequence, "submitted": before, "transfer": coin}
             emit("submitted", sequence=sequence, global_sequence=slots[sequence - 1] + 1,
                  recipient=recipient, transaction_id=tx_id, rpc_seconds=time.monotonic() - before)
+            emit("mempool_accepted_observed", sequence=sequence, transaction_id=tx_id)
         except Exception as error:
             failures += 1
-            emit("submission_error", sequence=sequence, error=str(error), outcome="unknown_or_rejected_no_retry")
+            emit("submission_error", sequence=sequence, transaction_id=coin["transaction_id"],
+                 input_id=coin["input_id"], output_id=coin["output_id"],
+                 error=str(error), outcome="unknown_or_rejected_no_retry")
 
     async def monitor() -> None:
         while True:
-            for tx_id, info in list(pending.items()):
-                try:
-                    tx = (await client.fetch("get_transaction", {"transaction_id": tx_id}))["transaction"]
-                    if not info["accepted"] and any(entry[1] == 1 for entry in tx.get("sent_to", [])):
-                        info["accepted"] = True
-                        emit("mempool_accepted_observed", sequence=info["sequence"], transaction_id=tx_id)
-                    if tx["confirmed"]:
+            snapshot = dict(pending)
+            try:
+                heights = await confirmed_heights(client, [info["transfer"] for info in snapshot.values()]) if snapshot else {}
+                for tx_id, info in snapshot.items():
+                    if tx_id in heights:
                         confirmed[tx_id] = info
                         pending.pop(tx_id)
                         emit("confirmed_observed", sequence=info["sequence"], transaction_id=tx_id,
-                             height=tx["confirmed_at_height"], elapsed_seconds=time.monotonic() - info["submitted"])
-                except Exception as error:
-                    emit("observation_error", transaction_id=tx_id, error=str(error))
+                             height=heights[tx_id], elapsed_seconds=time.monotonic() - info["submitted"])
+            except Exception as error:
+                emit("observation_error", error=str(error))
             if sending_done.is_set() and not pending:
                 return
             await asyncio.sleep(args.poll_interval)
 
     observer = create_referenced_task(monitor())
     emit("measurement_started", global_target_tps=args.tps, sender_index=sender_index,
+         submission_mode="presigned_full_node_rpc",
          sender_count=sender_count, seed=getattr(args, "seed", 42),
          start_monotonic=started, duration_seconds=args.duration, planned=len(coins))
     try:
@@ -323,15 +372,15 @@ async def generate(client: RpcClient, args: argparse.Namespace, coins: list[dict
             emit("drain_timeout", pending=len(pending))
         # Recheck confirmations at the end to detect reorgs or observation errors.
         verified = 0
-        for tx_id in list(confirmed):
-            try:
-                tx = (await client.fetch("get_transaction", {"transaction_id": tx_id}))["transaction"]
-                verified += bool(tx["confirmed"])
-                if not tx["confirmed"]:
+        try:
+            heights = await confirmed_heights(client, [info["transfer"] for info in confirmed.values()])
+            for tx_id in list(confirmed):
+                verified += tx_id in heights
+                if tx_id not in heights:
                     pending[tx_id] = confirmed.pop(tx_id)
                     emit("confirmation_revoked", transaction_id=tx_id)
-            except Exception as error:
-                emit("final_verification_error", transaction_id=tx_id, error=str(error))
+        except Exception as error:
+            emit("final_verification_error", error=str(error))
         summary = {"planned": len(coins), "attempted": attempted, "skipped": skipped,
                    "submitted": len(pending) + len(confirmed), "submission_errors": failures,
                    "confirmed_observed": len(confirmed), "confirmed_final_verified": verified,
@@ -350,13 +399,13 @@ async def generate(client: RpcClient, args: argparse.Namespace, coins: list[dict
         await asyncio.gather(observer, *list(jobs), return_exceptions=True)
 
 
-async def coordinated_run(client: RpcClient, args: argparse.Namespace, emit: Emit) -> None:
+async def coordinated_run(client: RpcClient, full_node: RpcClient, args: argparse.Namespace, emit: Emit) -> None:
     """A pipe barrier avoids races between wallet preparation and measurement."""
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     transport, _ = await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, sys.stdin)
     command = create_referenced_task(reader.readline())
-    preparation = create_referenced_task(prepare_coins(client, args, emit))
+    preparation = create_referenced_task(prepare_transfers(client, args, emit))
     workload = None
     disconnect = None
     try:
@@ -372,7 +421,7 @@ async def coordinated_run(client: RpcClient, args: argparse.Namespace, emit: Emi
         start_at = message["start_monotonic"]
         if message.get("command") != "start" or not isinstance(start_at, (int, float)) or not math.isfinite(start_at):
             raise ValueError("Invalid coordinated start command")
-        workload = create_referenced_task(generate(client, args, coins, emit, start_at=start_at))
+        workload = create_referenced_task(generate(full_node, args, coins, emit, start_at=start_at))
         disconnect = create_referenced_task(reader.readline())
         done, _ = await asyncio.wait({workload, disconnect}, return_when=asyncio.FIRST_COMPLETED)
         if workload not in done:
@@ -410,11 +459,14 @@ async def main(args: argparse.Namespace) -> None:
             emit("started", fingerprint=fingerprint, recipient=args.recipient,
                  amount_mojos=args.amount_mojos, fee_mojos=args.fee_mojos)
             try:
-                if args.coordinated:
-                    await coordinated_run(client, args, emit)
-                else:
-                    coins = await prepare_coins(client, args, emit)
-                    await generate(client, args, coins, emit)
+                async with RpcClient.create_as_context(
+                    "localhost", uint16(config["full_node"]["rpc_port"]), root, config
+                ) as full_node:
+                    if args.coordinated:
+                        await coordinated_run(client, full_node, args, emit)
+                    else:
+                        coins = await prepare_transfers(client, args, emit)
+                        await generate(full_node, args, coins, emit)
             except BaseException as error:
                 emit("failed", error=str(error), note="Already submitted transactions are not cancelled")
                 raise

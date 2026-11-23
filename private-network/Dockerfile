@@ -19,6 +19,6 @@ RUN mkdir /tmp/vdf && \
       "$(python -c 'import pathlib, chiavdf; print(pathlib.Path(chiavdf.__file__).parent)')/vdf_client" && \
     rm -rf /tmp/vdf && \
     python -c 'from chia.timelord.timelord_launcher import find_vdf_client; print(find_vdf_client())'
-COPY docker/private-network /app/docker/private-network
+COPY private-network /app/private-network
 ENV CHIA_ROOT=/data/chia CHIA_KEYS_ROOT=/data/keys PYTHONUNBUFFERED=1
-ENTRYPOINT ["bash", "/app/docker/private-network/entrypoint.sh"]
+ENTRYPOINT ["bash", "/app/private-network/entrypoint.sh"]

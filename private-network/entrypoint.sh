@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export ROLE=${1:?Expected role: timelord or farmer}
+export ROLE=${1:?Expected role: timelord, farmer or full_node}
 export NODE_NAME=${2:?Expected node name}
 : "${KOLLAPS_UUID:?Kollaps must provide an experiment UUID}"
 
@@ -10,7 +10,7 @@ if [[ ! -f "$CHIA_ROOT/config/config.yaml" ]]; then
   # Each node keeps its own private CA and service certificates in /data.
   chia init
 fi
-python /app/docker/private-network/configure.py
+python /app/private-network/configure.py
 
 if [[ "$ROLE" == farmer ]]; then
   plot_count=${PLOT_COUNT:-32}
@@ -22,7 +22,7 @@ if [[ "$ROLE" == farmer ]]; then
   plots=(/data/plots/k19/plot-k19-*.plot)
   missing=$((plot_count - ${#plots[@]}))
   if ((missing > 0)); then
-    python /app/docker/private-network/plot.py "$missing"
+    python /app/private-network/plot.py "$missing"
   fi
 fi
 
@@ -39,6 +39,7 @@ trap 'exit 0' TERM INT
 case "$ROLE" in
   timelord) chia start timelord ;;
   farmer) chia start farmer ;;
+  full_node) chia start node ;;
   *) echo "Unknown ROLE: $ROLE" >&2; exit 1 ;;
 esac
 wait "$daemon_pid"

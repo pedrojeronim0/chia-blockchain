@@ -3,6 +3,10 @@ set -euo pipefail
 
 integration_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 plot_count=${PLOT_COUNT:-32}
+if [[ -v FARMER_COUNT || -v FULL_NODE_COUNT ]]; then
+  echo "Define nodes in topology.xml; FARMER_COUNT and FULL_NODE_COUNT are no longer supported" >&2
+  exit 1
+fi
 if [[ ! "$plot_count" =~ ^[1-9][0-9]*$ ]]; then
   echo "PLOT_COUNT must be a positive integer" >&2
   exit 1
@@ -29,9 +33,13 @@ if [[ $(docker network inspect kollaps_network --format '{{.Driver}}') != overla
   echo "kollaps_network must be an internal overlay network" >&2
   exit 1
 fi
-for node in timelord farmer-1 farmer-2 farmer-3; do
-  docker volume create "chia-kollaps-$node-data" >/dev/null
-done
+volume_names=$(docker run --rm --entrypoint python3 \
+  -v "$integration_dir:$integration_dir:ro" \
+  kollaps-deployment-generator:2.0 \
+  "$integration_dir/generate.py" "$integration_dir/topology.xml" --list-volumes)
+while IFS= read -r volume; do
+  docker volume create "$volume" >/dev/null
+done <<< "$volume_names"
 
 generated_stack=$(mktemp "$integration_dir/stack.XXXXXX")
 trap 'rm -f "$generated_stack"' EXIT
