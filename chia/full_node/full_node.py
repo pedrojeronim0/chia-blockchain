@@ -2140,6 +2140,7 @@ class FullNode:
         peer: WSChiaConnection | None,
         state_change_summary: StateChangeSummary,
         ppp_result: PeakPostProcessingResult,
+        locally_created: bool = False,
     ) -> None:
         """
         Does NOT need to be called under the blockchain lock. Handle other parts of post processing like communicating
@@ -2189,7 +2190,9 @@ class FullNode:
             if peer is not None:
                 await self.server.send_to_all([msg], NodeType.FULL_NODE, peer.peer_node_id)
             else:
-                await self.server.send_to_all([msg], NodeType.FULL_NODE)
+                await self.server.send_to_all(
+                    [msg], NodeType.FULL_NODE, announcement_block_hash=block.header_hash if locally_created else None
+                )
 
         coin_hints: dict[bytes32, bytes32] = {
             coin_id: bytes32(hint) for coin_id, hint in ppp_result.hints if len(hint) == 32
@@ -2419,7 +2422,7 @@ class FullNode:
         if ppp_result is not None:
             assert state_change_summary is not None
             post_process_time2 = time.monotonic()
-            await self.peak_post_processing_2(block, peer, state_change_summary, ppp_result)
+            await self.peak_post_processing_2(block, peer, state_change_summary, ppp_result, locally_created=peer is None)
             post_process_time2 = time.monotonic() - post_process_time2
         else:
             post_process_time2 = 0.0
@@ -2787,8 +2790,13 @@ class FullNode:
             return conn.protocol_version > Version("0.0.35")
 
         peer_id: bytes32 | None = None if peer is None else peer.peer_node_id
-        await self.server.send_to_all_if([msg], NodeType.FULL_NODE, old_clients, peer_id)
-        await self.server.send_to_all_if([msg2], NodeType.FULL_NODE, new_clients, peer_id)
+        announcement_block_hash = block.get_hash() if peer is None else None
+        await self.server.send_to_all_if(
+            [msg], NodeType.FULL_NODE, old_clients, peer_id, announcement_block_hash=announcement_block_hash
+        )
+        await self.server.send_to_all_if(
+            [msg2], NodeType.FULL_NODE, new_clients, peer_id, announcement_block_hash=announcement_block_hash
+        )
 
         self._state_changed(
             "unfinished_block",

@@ -20,6 +20,7 @@ from packaging.version import Version
 from typing_extensions import Protocol, final
 
 from chia import __version__
+from chia.protocols.full_node_protocol import RespondBlock, RespondBlocks, RespondUnfinishedBlock
 from chia.protocols.outbound_message import Message, NodeType, make_msg
 from chia.protocols.protocol_message_type_to_node_type import ProtocolMessageTypeToNodeType
 from chia.protocols.protocol_message_types import ProtocolMessageTypes
@@ -86,6 +87,12 @@ class ConnectionClosedCallbackProtocol(Protocol):
     ) -> None: ...
 
 
+@dataclass(frozen=True)
+class ReceivedBlockMessage(Message):
+    # Local transport metadata. Message's streamable fields define the wire format.
+    received_ns: int
+
+
 @final
 @dataclass
 class WSChiaConnection:
@@ -116,7 +123,7 @@ class WSChiaConnection:
     # Messaging
     received_message_callback: ConnectionCallback | None = field(repr=False)
     incoming_queue: asyncio.Queue[Message] = field(default_factory=asyncio.Queue, repr=False)
-    outgoing_queue: asyncio.PriorityQueue[tuple[int, int, Message]] = field(
+    outgoing_queue: asyncio.PriorityQueue[tuple[int, int, Message] | tuple[int, int, Message, bytes32]] = field(
         default_factory=asyncio.PriorityQueue, repr=False
     )
     _send_seq: int = field(default=0, repr=False)
@@ -457,8 +464,9 @@ class WSChiaConnection:
             while not self.closed:
                 item = await self.outgoing_queue.get()
                 if item is not None:
-                    priority, _seq, msg = item
-                    await self._send_message(msg, priority=priority)
+                    priority, _seq, msg = item[:3]
+                    announcement_block_hash = item[3] if len(item) == 4 else None
+                    await self._send_message(msg, priority=priority, announcement_block_hash=announcement_block_hash)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -555,10 +563,22 @@ class WSChiaConnection:
                 self.execute_tasks.add(task_id)
                 timeout = None
 
+            payload: bytes | RespondUnfinishedBlock = full_message.data
+            if (
+                isinstance(full_message, ReceivedBlockMessage)
+                and bare_message_type == ProtocolMessageTypes.respond_unfinished_block
+            ):
+                payload = RespondUnfinishedBlock.from_bytes(full_message.data)
+                self.log.info(
+                    "unfinished_block_received block_hash=%s monotonic_ns=%s",
+                    payload.unfinished_block.get_hash().hex(),
+                    full_message.received_ns,
+                )
+
             if metadata.peer_required:
-                coroutine = metadata.method(self.api, full_message.data, self)
+                coroutine = metadata.method(self.api, payload, self)
             else:
-                coroutine = metadata.method(self.api, full_message.data)
+                coroutine = metadata.method(self.api, payload)
 
             async def wrapped_coroutine() -> Message | None:
                 try:
@@ -663,13 +683,18 @@ class WSChiaConnection:
             self.log.error(f"Exception: {e}")
             self.log.error(f"Exception Stack: {error_stack}")
 
-    async def send_message(self, message: Message, priority: int = 0) -> bool:
+    async def send_message(
+        self, message: Message, priority: int = 0, *, announcement_block_hash: bytes32 | None = None
+    ) -> bool:
         """Send message sends a message with no tracking / callback."""
         if self.closed:
             return False
         seq = self._send_seq
         self._send_seq += 1
-        await self.outgoing_queue.put((priority, seq, message))
+        if announcement_block_hash is None:
+            await self.outgoing_queue.put((priority, seq, message))
+        else:
+            await self.outgoing_queue.put((priority, seq, message, announcement_block_hash))
         return True
 
     async def call_api(
@@ -715,7 +740,16 @@ class WSChiaConnection:
         recv_method = self.stub_metadata_for_type[self.local_type].message_type_to_request[recv_message_type].method
         receive_metadata = ApiMetadata.from_bound_method(recv_method)
         assert receive_metadata is not None, f"ApiMetadata unavailable for {recv_method}"
-        return receive_metadata.message_class.from_bytes(response.data)
+        result = receive_metadata.message_class.from_bytes(response.data)
+        if isinstance(response, ReceivedBlockMessage) and isinstance(result, (RespondBlock, RespondBlocks)):
+            blocks = [result.block] if isinstance(result, RespondBlock) else result.blocks
+            for block in blocks:
+                self.log.info(
+                    "full_block_received block_hash=%s monotonic_ns=%s",
+                    block.header_hash.hex(),
+                    response.received_ns,
+                )
+        return result
 
     def _next_request_nonce(self, nonce: uint16) -> uint16:
         if self.is_outbound:
@@ -790,17 +824,19 @@ class WSChiaConnection:
                 assert rl_window.in_flight > 0
                 rl_window.in_flight -= 1
 
-    async def _wait_and_retry(self, msg: Message, priority: int = 0) -> None:
+    async def _wait_and_retry(
+        self, msg: Message, priority: int = 0, *, announcement_block_hash: bytes32 | None = None
+    ) -> None:
         try:
             await asyncio.sleep(1)
-            seq = self._send_seq
-            self._send_seq += 1
-            await self.outgoing_queue.put((priority, seq, msg))
+            await self.send_message(msg, priority=priority, announcement_block_hash=announcement_block_hash)
         except Exception as e:
             self.log.debug(f"Exception {e} while waiting to retry sending rate limited message")
             return None
 
-    async def _send_message(self, message: Message, priority: int = 0) -> None:
+    async def _send_message(
+        self, message: Message, priority: int = 0, *, announcement_block_hash: bytes32 | None = None
+    ) -> None:
         encoded: bytes = bytes(message)
         size = len(encoded)
         assert len(encoded) < (2 ** (LENGTH_BYTES * 8))
@@ -844,7 +880,12 @@ class WSChiaConnection:
                 rl_window = self.rate_limit_windows[message_type]
                 # Drop and retry this message if sending it exceeds the window
                 if peer_subject_to_rl and rl_window.in_flight >= window_size:
-                    create_referenced_task(self._wait_and_retry(message, priority=priority), known_unreferenced=True)
+                    create_referenced_task(
+                        self._wait_and_retry(
+                            message, priority=priority, announcement_block_hash=announcement_block_hash
+                        ),
+                        known_unreferenced=True,
+                    )
                     details = ", ".join(
                         [
                             f"{message_type.name}",
@@ -881,7 +922,10 @@ class WSChiaConnection:
                     # TODO: fix this special case. This function has rate limits which are too low.
                     if ProtocolMessageTypes(message.type) != ProtocolMessageTypes.respond_peers:
                         create_referenced_task(
-                            self._wait_and_retry(message, priority=priority), known_unreferenced=True
+                            self._wait_and_retry(
+                                message, priority=priority, announcement_block_hash=announcement_block_hash
+                            ),
+                            known_unreferenced=True,
                         )
 
                     return None
@@ -892,7 +936,17 @@ class WSChiaConnection:
                         f"peer: {self.peer_info.host}"
                     )
 
-        await self.ws.send_bytes(encoded)
+        if announcement_block_hash is not None:
+            event = (
+                "full_block_announce_started"
+                if message_type == ProtocolMessageTypes.new_peak
+                else "unfinished_block_announce_started"
+            )
+            sent_ns = time.monotonic_ns()
+            await self.ws.send_bytes(encoded)
+            self.log.info("%s block_hash=%s monotonic_ns=%s", event, announcement_block_hash.hex(), sent_ns)
+        else:
+            await self.ws.send_bytes(encoded)
         self.log.debug(
             f"-> {ProtocolMessageTypes(message.type).name} to peer {self.peer_info.host} {self.peer_node_id}"
         )
@@ -900,6 +954,7 @@ class WSChiaConnection:
 
     async def _read_one_message(self) -> Message | None:
         message = await self.ws.receive()
+        received_ns = time.monotonic_ns()
 
         if self.connection_type is not None:
             connection_type_str = NodeType(self.connection_type).name.lower()
@@ -1014,7 +1069,14 @@ class WSChiaConnection:
                         f"Peer surpassed rate limit {self.peer_info.host}, message: {message_type.name}, "
                         f"port {self.peer_info.port} but not disconnecting"
                     )
-                    return full_message_loaded
+            if self.local_type == NodeType.FULL_NODE and message_type in {
+                ProtocolMessageTypes.respond_unfinished_block,
+                ProtocolMessageTypes.respond_block,
+                ProtocolMessageTypes.respond_blocks,
+            }:
+                return ReceivedBlockMessage(
+                    full_message_loaded.type, full_message_loaded.id, full_message_loaded.data, received_ns
+                )
             return full_message_loaded
         elif message.type == WSMsgType.ERROR:
             self.log.error(f"WebSocket Error: {message}")

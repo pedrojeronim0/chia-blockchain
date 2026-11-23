@@ -658,12 +658,14 @@ class ChiaServer:
         messages: list[Message],
         node_type: NodeType,
         exclude: bytes32 | None = None,
+        *,
+        announcement_block_hash: bytes32 | None = None,
     ) -> None:
         await self.validate_broadcast_message_type(messages, node_type)
         for _, connection in self.all_connections.items():
             if connection.connection_type is node_type and connection.peer_node_id != exclude:
                 for message in messages:
-                    await connection.send_message(message)
+                    await connection.send_message(message, announcement_block_hash=announcement_block_hash)
 
     async def send_to_all_if(
         self,
@@ -671,12 +673,14 @@ class ChiaServer:
         node_type: NodeType,
         predicate: Callable[[WSChiaConnection], bool],
         exclude: bytes32 | None = None,
+        *,
+        announcement_block_hash: bytes32 | None = None,
     ) -> None:
         await self.validate_broadcast_message_type(messages, node_type)
         for _, connection in self.all_connections.items():
             if connection.connection_type is node_type and connection.peer_node_id != exclude and predicate(connection):
                 for message in messages:
-                    await connection.send_message(message)
+                    await connection.send_message(message, announcement_block_hash=announcement_block_hash)
 
     async def send_to_specific(self, messages: list[Message], node_id: bytes32) -> None:
         if node_id in self.all_connections:
