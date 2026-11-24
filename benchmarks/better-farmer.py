@@ -66,7 +66,7 @@ from chia.util.keychain import Keychain
 from chia.wallet.derive_keys import master_sk_to_farmer_sk, master_sk_to_pool_sk
 
 DEFAULT_ROOT = pathlib.Path("/home/franciscomartins/.chia/my_testnet")
-DEFAULT_BUCKET_SIZE = 100
+DEFAULT_BUCKET_SIZE = 500
 DEFAULT_WARMUP = 3
 MAX_ATTEMPTS = 2_000_000
 STORE_VERSION = 1
